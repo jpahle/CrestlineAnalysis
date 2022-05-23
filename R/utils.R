@@ -73,6 +73,158 @@ limitRangeOffset <- function(start, end, offset) limitLow(start + offset, start)
 # calculate maximum difference within a vector
 maxdiff <- function(a) return(max(a) - min(a))
 
+# rotate function
+rotate <- function(x) t(apply(x, 2, rev))
+rotatecounterclockwise <- function(x) apply(t(x), 2, rev)
+
+# flip functions for matrices
+flipud <- function(x) x[dim(x)[1]:1,]
+# flip functions for strings => reverse a character string
+strrev <- function(x) sapply(lapply(strsplit(x, NULL), rev), paste, collapse="")
+
+# apply minimum or maximum filter to matrix
+ordfilt <- function(m, size=5, thres=0.2, type="min", bgval=0, outlier=0.2) {
+  # only odd values allowed
+  if (!odd(size)) {
+    stop("ordfilt/minfilt/maxfilt function is only valid for odd filter sizes")
+  }
+  # prepare parameters (dummy variables needed due to performance reasons)
+  sizeminusone <- size - 1
+  # get matrix dimensions
+  xdim <- dim(m)[2]
+  ydim <- dim(m)[1]
+  res <- matrix(0, nrow=ydim, ncol=xdim)
+  # pad matrix
+  pad <- ((size - 1) / 2)
+  m <- sympad(m, pad=pad)
+  # calculate mean filter
+  if (type == "mean") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        res[y,x] <- mean(m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)])
+      }
+    }
+  }
+  # calculate min filter
+  if (type == "min") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        res[y,x] <- min(m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)])
+      }
+    }
+  }
+  # calculate max filter
+  if (type == "max") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        res[y,x] <- max(m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)])
+      }
+    }
+  }
+  # calculate background filter
+  if (type == "background") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        temp <- m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)]
+        if (bg(temp, outlier=outlier)) {
+          res[y,x] <- bgval
+        } else {
+          res[y,x] <- min(temp)
+        }
+      }
+    }
+  }
+  # calculate kymograph filter = "rolling mean" filter
+  # keep value only if a significant number of values are larger or smaller than zero
+  if (type == "kymo") {
+    npixel <- size * size
+    thres <- limit(thres)
+    threslow <- round(npixel * thres)
+    threshigh <- round(npixel * (1 - thres))
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        temp <- m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)]
+        nlow <- length(which(temp < 0))
+        if ((nlow <= threslow) || (nlow > threshigh)) {
+          res[y,x] <- mean(temp)
+        }
+      }
+    }
+  }
+  # calculate minmax filter
+  if (type == "minmax") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        #       temp <- m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)]
+        #       res[y,x] <- max(temp) - min(temp)
+        # old       res[y,x] <- sd(temp) / mean(temp)
+        temp <- c(m[(pad + y - pad):(pad + y + pad), (pad + x - pad)], 
+                  m[(pad + y - pad):(pad + y + pad), (pad + x + pad)],
+                  m[(pad + y - pad) ,(pad + x - pad):(pad + x + pad)],
+                  m[(pad + y + pad) ,(pad + x - pad):(pad + x + pad)])
+        #        res[y,x] <- sd(temp)
+        res[y,x] <- sum(abs(temp - max(temp))) / max(temp)
+      }
+    }
+  }
+  if (type == "max2") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        temp <- c(m[(pad + y - pad):(pad + y + pad),(pad + x)], m[(pad + y),(pad + x - pad):(pad + x + pad)])
+        res[y,x] <- max(temp)
+      }
+    }
+  }
+  if (type == "minmax2") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        #         temp <- m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)]
+        temp <- c(m[(pad + y - pad):(pad + y + pad),(pad + x)], m[(pad + y),(pad + x - pad):(pad + x + pad)])
+        #         res[y,x] <- max(temp) - min(temp)
+        #         res[y,x] <- (max(temp) - min(temp))/mean(temp)
+        res[y, x] <- min(temp)
+      }
+    }
+  }
+  if (type == "minmax3") res <- filt(xdim, ydim, pad, m, fun=min, type="area")
+  if (type == "minmax4") res <- filt(xdim, ydim, pad, m, fun=max, fun2=min, type="area")
+  if (type == "minmax5") res <- filt(xdim, ydim, pad, m, fun=max, fun2=min, fun3=mean, type="area")
+  # calculate variation filter
+  if (type == "var") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        temp <- m[(pad + y - pad):(pad + y + pad),(pad + x - pad):(pad + x + pad)]
+        res[y,x] <- sum(abs(temp[,1:sizeminusone] - temp[,2:size])) + sum(abs(temp[1:sizeminusone,] - temp[2:size,]))
+      }
+    }
+  }
+  if (type == "v") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        temp1 <- m[(pad + y - 4):(pad + y + 0),(pad + x - pad):(pad + x + pad)]
+        temp2 <- m[(pad + y + 1):(pad + y + 5),(pad + x - pad):(pad + x + pad)]
+        res[y,x] <- max(abs(max(temp1) - min(temp2)) , abs(max(temp2) - min(temp1)))
+      }
+    }
+  }
+  if (type == "var2") {
+    for (y in 1:ydim) {
+      for (x in 1:xdim) {
+        temp <- c(m[(pad + y - pad):(pad + y + pad),(pad + x)], m[(pad + y),(pad + x - pad):(pad + x + pad)])
+        res[y,x] <- max(temp) - min(temp)
+      }
+    }
+  }
+  return(res)
+}
+minfilt <- function(m, size=5) ordfilt(m=m, size=size, type="min")
+maxfilt <- function(m, size=5) ordfilt(m=m, size=size, type="max")
+varfilt <- function(m, size=5) ordfilt(m=m, size=size, type="var")
+meanfilt <- function(m, size=5) ordfilt(m=m, size=size, type="mean")
+kymofilt <- function(m, size=15, thres=0.2) ordfilt(m=m, size=size, thres=thres, type="kymo")
+bgfilt <- function(m, size=5, bgval=0) ordfilt(m=m, size=size, bgval=bgval, type="background")
+
+
 ########################################################################################################
 # +--------------------------------------------------------------------------------------------------+ #
 # |                                        SLIDING WINDOWS                                           | #

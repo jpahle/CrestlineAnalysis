@@ -56,7 +56,421 @@ library(tiff)
 #library(cluster)
 #library(ggplot2)
 #library(plotly)
-#library(R.matlab)
+
+
+
+# ##################################################################################################################### #
+# +-------------------------------------------------------------------------------------------------------------------+ #
+# |                                                                                                                   | #
+# |        C R E S T L I N E        ALGORITHM        C R E S T L I N E        ALGORITHM       C R E S T L I N E       | #
+# |                                                                                                                   | #
+# +-------------------------------------------------------------------------------------------------------------------+ #
+# ##################################################################################################################### #
+# -----------------------------------------------------------------------------------------------------------------------
+# calculates the "crestline" of the image
+# -----------------------------------------------------------------------------------------------------------------------
+crestlineAlgorithm <- function(img, ystart=1) {
+  # scale image columnwise
+  xdim <- dim(img)[2]
+  ydim <- dim(img)[1]
+  res <- matrix(0, nrow=ydim, ncol=xdim)
+  for (i in 1:dim(img)[2]) {
+    minimum <- min(img[ystart:ydim,i])
+    maximum <- max(img[ystart:ydim,i])
+    if (maximum - minimum > 0) { 
+      res[,i] <- (img[,i] - minimum) / (maximum - minimum)
+    }
+    # if all values are identical (maximum == minimum) the column keeps its default value: zero
+    #  (the assumption here is: the columns contains no measurement data therefore it is set to zero)
+  }
+  # cut "overscaled" regions
+  res[which(res < 0)] <- 0
+  res[which(res > 1)] <- 1
+  # return crestline matrix
+  return(res)
+}
+
+########################################################################################################
+# +--------------------------------------------------------------------------------------------------+ #
+# |                                get parameters from dataset                                       | #
+# +--------------------------------------------------------------------------------------------------+ #
+########################################################################################################
+getParameter <- function(shortname, dataset) {
+  # find dataset
+  d <- which(dataset$id == toupper(shortname))
+  if (length(d) == 0) {
+    stop(paste0("Unknown filename or dataset ", shortname, "."))
+  }
+  if (length(d) > 1) {
+    stop(paste0("ERROR: found several datasets named ", shortname, "."))
+  }
+  # get stimulus from first and second character of the shortname
+  stimshort <- c("NA", "AT", "CH", "C8", "FL", "FC", "FN", "CN")
+  stimlong <- c("NaCl", "ATP", "Chitin", "C8", "flg22", "flg22+Chitin", "NaCl+flg22", "C8+NaCl")
+  index <- which(substr(shortname, 1, 2) == stimshort)
+  if (length(index) > 0) {
+    stimulus <- stimlong[index]
+  } else {
+    stimulus <- ""
+  }
+  # return filename, period, stimulation start time in minutes, spatial resolution in mm, name of stimulus, y region of interest (ROI), and rotation degrees
+  #  (dataset is a factor therefore first coerce it to character then to double)
+  return(list(as.character(dataset$file[d]),
+              as.double(as.character(dataset$period[d])),
+              as.double(as.character(dataset$stimstart[d])) / 60,
+              as.double(dataset$mmPerPixel[d]),
+              stimulus,
+              as.double(dataset$rotate[d]),
+              as.double(dataset$yROI1[d]),
+              as.double(dataset$yROI2[d])))
+}
+
+###########################################################
+# get filename from dataset short name
+###########################################################
+getFilename <- function(shortname, dataset) {
+  return(getParameter(shortname, dataset)[[1]])
+}
+
+###########################################################
+# get period and stimulation start from dataset short name
+###########################################################
+getPeriod <- function(shortname, dataset) {
+  return(getParameter(shortname, dataset)[[2]])
+}
+getStimulationStart <- function(shortname, dataset) {
+  return(getParameter(shortname, dataset)[[3]])
+}
+getmmPerPixel <- function(shortname, dataset) {
+  return(getParameter(shortname, dataset)[[4]])
+}
+getStimulus <- function(shortname, dataset) {
+  return(getParameter(shortname, dataset)[[5]])
+}
+
+###########################################################
+# rotate image stack
+###########################################################
+rotateImage <- function(imgstack, degree=0) {
+  # rotate single image
+  if (class(imgstack) != "list") {
+    if (degree == 180) {
+      return (rotate(rotate(imgstack)))
+    }
+  }
+  # rotate image stack
+  if (degree == 180) {
+    for(i in 1:length(imgstack)) {
+      imgstack[[i]] <- rotate(rotate(imgstack[[i]]))
+    }
+  }
+  return (imgstack)
+}
+
+
+########################################################################################################
+# +--------------------------------------------------------------------------------------------------+ #
+# | read image stack                                                                                 | #
+# +--------------------------------------------------------------------------------------------------+ #
+########################################################################################################
+readImage <- function(filenameAndPath, yROI=c(NA, NA), rotationDegrees=NA, folder=NA) {
+  # check for short name => if shortname is given get filename from shortname (no dot => assume a shortname is given)
+  if (length(grep("\\.", filenameAndPath)) == 0) {
+    filenameAndPath <- file.path(folder, getFilename(filenameAndPath))
+  }
+  # check for tif file
+  if ((tolower(substr(filenameAndPath, nchar(filenameAndPath) - 4 + 1, nchar(filenameAndPath))) != ".tif") &&
+      (tolower(substr(filenameAndPath, nchar(filenameAndPath) - 5 + 1, nchar(filenameAndPath))) != ".tiff")){
+    # other image types are not supported
+    stop("ERROR: only .tif files supported")
+  }
+  #############################################################################################
+  s <- substr(filenameAndPath, nchar(filenameAndPath) - 9 + 1, nchar(filenameAndPath) - 4)
+  #############################################################################################
+  # filename ends with part1 => image is split into two files
+  if (tolower(s) == "part1") {
+    tempName <- paste0(substr(filenameAndPath, 1, nchar(filenameAndPath) - 9), "part2.tif")
+    imgStack <- append(suppressWarnings(tiff::readTIFF(filenameAndPath, info=TRUE, all=TRUE, as.is=TRUE)),
+                       suppressWarnings(tiff::readTIFF(tempName, info=TRUE, all=TRUE, as.is=TRUE)))
+  } else {
+    ###########################################################################################
+    # filename ends with 00001 => multiple single image files
+    if (s == "00001") {
+      # prepare file name
+      filenameBasic <- substr(filenameAndPath, 1, nchar(filenameAndPath) - 9)
+      i <- 1
+      imgStack <- list()
+      filenameImage <- paste0(filenameBasic, sprintf("%05d", i + 15), ".tif")
+      cat(filenameImage,"\n")
+      while (file.exists(filenameImage)) {
+        temp <- tiff::readTIFF(filenameImage, info=TRUE, all=TRUE, as.is=TRUE)[[1]]
+        if ((!is.null(yROI)) && (!is.na(yROI[1]))) {
+          imgStack[[i]] <- temp[yROI[1]:yROI[2],]
+        } else {
+          imgStack[[i]] <- temp
+        }
+        i <- i + 1
+        cat(".")
+        if ((i %% 100) == 0) cat("\n")
+        filenameImage <- paste0(filenameBasic, sprintf("%05d", i + 15), ".tif")
+      }
+      cat("Image loaded.\n")
+    } else {
+      #########################################################################################
+      # read image stack from single image file
+      imgStack <- suppressWarnings(tiff::readTIFF(filenameAndPath, info=TRUE, all=TRUE, as.is=TRUE))
+    }
+  }
+  # flip image if root tip is on the right section of the image
+  if (!is.na(rotationDegrees)) {
+    if (rotationDegrees == 180) {
+      imgStack <- rotateImage(imgStack, 180)
+    }
+  }
+  return(imgStack)
+}
+
+########################################################################################################
+# +--------------------------------------------------------------------------------------------------+ #
+# | get outline of the root                                                                          | #
+# +~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+ #
+# |   parameters:                                                                                    | #
+# |   img: image                                                                                     | #
+# |   show: TRUE => show binarized image and calculated outline of the root                          | #
+# |   minline=0.5 => remove lines (edges) that are smaller than 50 percent of the largest line       | #
+# +--------------------------------------------------------------------------------------------------+ #
+########################################################################################################
+getOutline <- function(img, show=FALSE, windowSize=50, minline=0.5, pixelmm=0.001 / 0.9091, sdFactor=10, useMinMaxPerimeter=FALSE) {
+  # binarize image using the border intensity
+  imgbin <- binarizeThreshold(img, thres=borderIntensity(img, sdFactor=sdFactor))
+  # filter image and binarize again
+  imgbin <- binarizeThreshold(meanfilt(imgbin, size=5), 0.99)
+  if (show) {
+    imgshow(imgbin, title="BINARIZED (THRESHOLD)", pixelx=pixelmm, pixely=pixelmm, timeSpaceDiagram=FALSE)
+  }
+  # detect edges using the perim function
+  imgout <- perim(imgbin)
+  if (show) {
+    imgshow(imgout, title="OUTLINE (including artifacts)", pixelx=pixelmm, pixely=pixelmm, timeSpaceDiagram=FALSE)
+  }
+  
+  # remove small edges smaller than 50 percent of the largest object
+  imgout <- removeSmallObjects(imgout, minline)
+  
+  # smooth outline
+  imgout <- smoothOutline(imgout, windowSize=windowSize, useMinMaxPerimeter=useMinMaxPerimeter)
+  
+  if (show) {
+    imgshow(imgout, title="OUTLINE", pixelx=pixelmm, pixely=pixelmm, timeSpaceDiagram=FALSE)
+  }
+  # return outline and binarized image
+  return(list(imgout, imgbin))
+}
+
+
+########################################################################################################
+# +--------------------------------------------------------------------------------------------------+ #
+# | get longitudinal axis ("centerline") of the root                                                 | #
+# +--------------------------------------------------------------------------------------------------+ #
+########################################################################################################
+findTrack <- function(img, imgout, imgindex=1, show=TRUE, boxWidth=8, thicknessMin=0.05, thicknessMax=0.15,
+                      useThicknessForMask=TRUE, useRLibraryForMedoids=FALSE) {
+  # -----------------------------
+  # -       CENTER LINE         -
+  # -----------------------------
+  # calculate center line
+  # define stripe width for calculation of the center line
+  stripeWidth <- 30
+  # define step size of the sliding window of the polygon (in x OR y direction)
+  stepSize <- 5
+  # define distance step size for elongation into the direction of the borderline (euclidean distance into x AND y direction) 
+  stepSizeToBorderline <- 5
+  # define number of points for angle calculation
+  anglePoints <- 8
+  # define conditions for stopping the center line
+  distanceMin <- 1 # 2
+  distanceMaxFactor <- 4
+  distanceMax <- stepSize * distanceMaxFactor
+  deviationDegree <- 60 # stop line if the difference between two angles is larger than 60 degrees
+  # calculate center line
+  cl <- centerline(imgout, stripeWidth, stepSize, stepSizeToBorderline, anglePoints, distanceMin, distanceMax, deviationDegree,
+                   useRLibraryForMedoids=useRLibraryForMedoids)
+  # calculate track (angels along the centerline)
+  resolutionTrack <- 0.5 # define resolution for track
+  windowSizeAngle <- 75  # angle is calculated from 75 single points
+  # spanning a line of 75 * 0.5 = 37.5 pixels for the calculation of the angle
+  track <- calculateTrack(img, cl, resolution=resolutionTrack)
+  trackAngle <- calculateTrackAngle(track, windowSize=windowSizeAngle)
+  # get matrix dimensions
+  xdim <- dim(img)[2]
+  ydim <- dim(img)[1]
+  # plot outline and baseline
+  imgtemp <- imgout
+  for (i in 1:dim(track)[1]) {
+    imgtemp[limit(round(track[i, 1]), 1, ydim), limit(round(track[i, 2]), 1, xdim)] <- 1
+  }
+  #      imgshow(imgtemp, paste0("outline and baseline - image #", imgindex))
+  # plot angles along the baseline
+  #      plot(trackAngle, main="angles along the baseline")
+  # prepare mask list for the sliding box along the track line 
+  boxHeightFactorThickness <- 2  # height of the sliding box = thickness x factor
+  # factors for use without calculating the thickness
+  boxHeightFactorImgSize <- 0.15
+  # measure thickness
+  thicknessResults <- measureThickness(imgout, track, trackAngle, boxWidth, boxHeightFactorThickness)
+  thicknessPixel <- thicknessResults[[1]]
+  imgbox <- thicknessResults[[2]]
+  thickness <- thicknessPixel * pixelmm
+  # show thickness
+  cat("thickness:", round(thickness, 4), "mm\n")
+  # check thickness
+  if ((thickness < thicknessMin) || (thickness > thicknessMax)) {
+    status <- FALSE
+    message(paste0("WARNING: thickness of root exceeds default range (", thicknessMin, " - ", thicknessMax, " mm)."))
+  }
+  # -----------------------
+  # create mask
+  # -----------------------
+  if (useThicknessForMask) {
+    # add additional half of the thickness at both sides for calculating the mask (means: double the thickness)
+    boxHeight <- round(thicknessPixel * boxHeightFactorThickness)
+  } else {
+    # height of the box = factor times image width/height (use the smaller one of the width or height)
+    boxHeight <- round(boxHeightFactorImgSize * min(dim(img)))
+  }
+  mask <- createMask(img, track, trackAngle, boxWidth, boxHeight, FALSE, imgbin)
+  # show outline and centerline
+  if (show) {
+    # draw center line and show image with center line
+    imgbase <- drawCenterline(imgout, cl)
+    imgshow(imgbase, title=paste0("outline and dotted centerline - image #", imgindex), pixelx=pixelmm, pixely=pixelmm, timeSpaceDiagram=FALSE)
+    # add "template bars" for checking the thickness
+    imgbase <- imgbase | imgbox
+    #TODO
+    # show image
+    imgshow(imgbase, title=paste0("thickness measurement - image #", imgindex), pixelx=pixelmm, pixely=pixelmm, timeSpaceDiagram=FALSE)
+  }
+  return(list(mask, trackAngle, cl))
+}
+
+
+########################################################################################################
+# +--------------------------------------------------------------------------------------------------+ #
+# | calculate kymograph from image stack                                                             | #
+# +--------------------------------------------------------------------------------------------------+ #
+########################################################################################################
+calculateKymograph <- function(imgstack, rotatedeg=0, useBinaryMask=FALSE, show=FALSE, sdFactor=10, useMinMaxPerimeter=FALSE) {
+  # number of images
+  inum <- length(imgstack)
+  iwidth <- dim(imgstack[[1]])[2]
+  iheight <- dim(imgstack[[1]])[1]
+  if (rotatedeg == 180) {
+    imgstack <- rotateImage(imgstack, 180)
+  }
+  # select images
+  imglist <- 1:inum
+  # .-------------------------.
+  #     process images
+  # '-------------------------'
+  # init intensity (especially for quality control mode who does not calculate the mean intensity)
+  int <- NULL
+  # loop through images
+  imgcount <- 0
+  for (imgindex in imglist) {
+    # get image from image stack
+    img <- imgstack[[imgindex]]
+    # increase image counter
+    imgcount <- imgcount + 1
+    # detect edges
+    if (imgcount == 1) {
+      imgtemp <- getOutline(img, show=show, sdFactor=sdFactor, useMinMaxPerimeter=useMinMaxPerimeter)
+      imgout <- imgtemp[[1]]
+      imgbin <- imgtemp[[2]]
+      res <- findTrack(img, imgout, imgindex=imgindex)
+      mask <- res[[1]]
+      trackAngle <- res[[2]]
+      centerlineData <- res[[3]]
+      # init variables for kymograph
+      int <- matrix(0, nrow=length(imglist), ncol=length(trackAngle))
+    }
+    # mask image with binarized data of the first image
+    if (useBinaryMask) {
+      img[which(imgbin == 0)] <- 0
+    }
+    # calculate mean intensity along the baseline
+    # init intensity vector
+    trackInt <- rep(0, length(mask))
+    # calculate mean intensity of the masked image
+    for(i in 1:length(mask)) {
+      if (length(mask[[i]]) > 0) {
+        trackInt[i] <- mean(img[mask[[i]]])
+      }
+    }
+    int[imgcount,] <- trackInt
+  }
+  # return kymograph as a list
+  return(list(int))
+}
+
+
+########################################################################################################
+# +--------------------------------------------------------------------------------------------------+ #
+# | analyze calcium waves in plant roots:                                                            | #
+# |   calculate kymograph and crestline plot using threshold based object detection                  | #
+# +~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~+ #
+# |   filename: filename or shortname of dataset                                                     | #
+# |   folder: folder of the image file                                                               | #
+# +--------------------------------------------------------------------------------------------------+ #
+########################################################################################################
+
+# analyze calcium waves in plant roots
+##     classic:   threshold based object detection
+crestlineCalculation <- function(filename=NULL, folder="", shortname="", periodSeconds=NA, stimulationStartMinutes=NA, sdFactor=25,
+                                 stimulus="", rotationDegrees=0, show=TRUE) {
+  # ......................................................................................................................................
+  # trigger execution time
+  systime <- Sys.time()
+  # ......................................................................................................................................
+  # check for filename
+  if (length(filename) == 0) {
+    stop("No filename given.")
+  }
+  # ......................................................................................................................................
+  # if shortname is given get filename from shortname (no dot => assume a shortname is given)
+  #     and get image parameters (time/space resolution, stimulation start)
+  if (length(grep("\\.", filename)) == 0) {
+    shortname <- filename
+    # get filename, period and stimulation start time in minutes from the dataset
+    param <- getParameter(filename[i], dataset)
+    filename <- param[[1]]
+    periodSeconds <- param[[2]]
+    periodSecondsDefault <- periodSeconds
+    stimulationStartMinutes <- param[[3]]
+    mmPerPixel <- param[[4]]
+    stimulus <- param[[5]]
+    rotationDegrees <- param[[6]]
+    yROI <- c(param[[7]], param[[8]]) # ROI (region of interest is not used so far)
+  }
+  # check if period and stimulation start time are given
+  if (is.na(periodSeconds) || is.na(stimulationStartMinutes)) {
+    stop("no period/stimulation start time given. Use parameter 'periodSeconds' and 'stimulationStartMinutes' to provide the stimulation start time")
+  }
+  # kymograph and crestline calculation
+  res <- list()
+  # read image
+  imgstack <- readImage(file.path(folder, stimulus, filename), rotationDegrees=rotationDegrees)
+  # calculate kymograph
+  k <- calculateKymograph(imgstack, show=TRUE, sdFactor=sdFactor, useMinMaxPerimeter=TRUE, useBinaryMask=TRUE)
+  resolutionFactor <- 0.5
+  plotKymograph(k[[1]], stimulationStartMinutes=stimulationStartMinutes, periodSeconds=periodSeconds, mmPerPixel=mmPerPixel * resolutionFactor, title=filename, show=show)
+  res[[1]] <- k[[1]]
+  # calculate crestline plot
+  ignoreRows <- round(stimulationStartMinutes * 60 / periodSeconds)
+  res[[2]] <- crestlineAlgorithm(k[[1]], ystart=ignoreRows)
+  res[[3]] <- shortname
+  res[[4]] <- c(periodSeconds, stimulationStartMinutes, mmPerPixel, resolutionFactor * mmPerPixel)
+  return(res)
+}
 
 
 ########################################################################################################
